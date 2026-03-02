@@ -1,0 +1,257 @@
+
+---
+title: "COVID-19 Data Analysis: Final Project"
+author: "Kostia"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+## Introduction
+
+For this analysis I'm using COVID-19 data from the Johns Hopkins University GitHub repository which tracks confirmed cases and deaths at the US county level with daily updates since January 2020. I'll be examining whether the relationship between COVID cases and deaths changed after vaccines became widely available in 2021(arbitrary breaking point).
+
+## Data Import
+```{r libraries}
+library(tidyverse)
+library(lubridate)
+```
+```{r import_data}
+# Johns Hopkins COVID-19 data
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+file_names <- c("time_series_covid19_confirmed_US.csv",
+                "time_series_covid19_deaths_US.csv")
+
+urls <- str_c(url_in, file_names)
+
+# Read files
+us_cases <- read_csv(urls[1])
+us_deaths <- read_csv(urls[2])
+
+# EDA
+head(us_cases)
+```
+
+
+## Data Cleaning
+
+The raw data has each date as a separate column so I'll pivot it to long format where each date is a row. I'll also convert the date strings to actual date objects and remove columns I don't need like coordinates and ID codes. For the deaths dataset I'll keep the Population column since I'll need that later to calculate death rates.
+
+```{r clean_cases}
+us_cases <- us_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(Admin2, Province_State, Country_Region, date, cases, Combined_Key) %>%
+  mutate(date = mdy(date)) %>%
+  filter(cases > 0)
+
+head(us_cases)
+```
+```{r clean_deaths}
+us_deaths <- us_deaths %>%
+  pivot_longer(cols = -(UID:Population),
+               names_to = "date", 
+               values_to = "deaths") %>%
+  select(Admin2, Province_State, Country_Region, date, deaths, Population, Combined_Key) %>%
+  mutate(date = mdy(date))
+
+head(us_deaths)
+```
+```{r combine_data}
+# Join 
+us <- us_cases %>%
+  full_join(us_deaths)
+
+summary(us)
+```
+
+## Aggregating to National Level
+
+To look at the overall US trend I need to sum up all the county-level data by date to get national totals.
+```{r us_totals}
+us_totals <- us %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases, na.rm = TRUE),
+            deaths = sum(deaths, na.rm = TRUE),
+            Population = sum(Population, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  filter(cases > 0)
+
+tail(us_totals)
+```
+
+## Visualization 1: Cumulative US Cases and Deaths Over Time
+
+This visual looks at how total COVID cases and deaths accumulated in the United States from the beginning of the pandemic.
+```{r plot_us_totals, fig.width=10, fig.height=6}
+us_totals %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = cases, color = "Cases")) +
+  geom_point(aes(y = cases, color = "Cases"), alpha = 0.5) +
+  geom_line(aes(y = deaths, color = "Deaths")) +
+  geom_point(aes(y = deaths, color = "Deaths"), alpha = 0.5) +
+  scale_y_log10() +
+  scale_color_manual(values = c("Cases" = "orange", "Deaths" = "turquoise")) +
+  labs(
+    title = "COVID-19 Cases and Deaths in the United States",
+    subtitle = "Cumulative totals on logarithmic scale",
+    x = "Date",
+    y = "Count (log scale)",
+    color = ""
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+### Visualization 1: Key Takeaways
+
+The graph shows both cases and deaths growing exponentially at first and then the growth plateaus. I used a log scale on the y-axis because otherwise the early part of the pandemic would be impossible to see. It looks like the gap between the cases and deaths slightly increases over time, but what's interesting is that the growth of this gap is caused by an increase in cases with deaths remaining at about the same level. This raises a question about whether treatment got better so smaller proportion of people died, or was it caused by the fact that later we resumed travel which made younger people who have less likelihood of dying from the virus get infected more often.
+
+## Calculating New Cases and Deaths
+
+To see whether the pandemic was getting better or worse at different points I need to calculate new cases per day instead of just cumulative totals.
+```{r calculate_new_cases}
+us_totals <- us_totals %>%
+  mutate(
+    new_cases = cases - lag(cases),
+    new_deaths = deaths - lag(deaths)
+  )
+
+tail(us_totals %>% select(date, new_cases, new_deaths, cases, deaths))
+```
+
+## Defining Vaccination Periods
+
+Vaccines became available to the general public around January 2021. I'll split the data into pre-vaccination and post-vaccination periods using that date as the cutoff.
+```{r vaccination_periods}
+us_totals <- us_totals %>%
+  mutate(
+    period = if_else(date < as.Date("2021-01-01"), 
+                     "Pre-Vaccination", 
+                     "Post-Vaccination")
+  )
+
+us_totals %>%
+  group_by(period) %>%
+  summarize(
+    n_days = n(),
+    total_cases = max(cases, na.rm = TRUE),
+    total_deaths = max(deaths, na.rm = TRUE)
+  )
+```
+
+## Visualization 2: New Cases by Vaccination Period
+
+Now I'll plot daily new cases and color them by whether they happened before or after vaccines became available to see if patterns changed.
+```{r plot_new_cases_by_period, fig.width=12, fig.height=7}
+us_totals %>%
+  filter(!is.na(new_cases) & new_cases >= 0) %>%
+  ggplot(aes(x = date, y = new_cases, color = period)) +
+  geom_line(size = 0.8) +
+  geom_smooth(se = FALSE, size = 1.5, linetype = "dashed") +
+  scale_color_manual(values = c("Pre-Vaccination" = "red", 
+                                 "Post-Vaccination" = "blue")) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Daily New COVID-19 Cases in the United States",
+    subtitle = "Comparing pre-vaccination (before 2021) and post-vaccination periods",
+    x = "Date",
+    y = "New Cases Per Day",
+    color = "Period"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 14, face = "bold"))
+```
+
+### Visualization 2: Key Takeaways
+
+This graph is interesting because it shows that some of the biggest spikes in daily new cases happened after vaccines were already available. The red section shows the pre-vaccination period had some major waves but the blue post-vaccination period had peaks that were even higher especially in late 2021 and early 2022. The dashed trend lines show that on average new cases were actually higher in the post-vaccination period than before which seems counterintuitive. But one thing that I don't think we account for in the data is any of the quarantine measures taken by different locations. I wonder if the spikes in 2022 were also at least partially caused by the fact that people got tired of all the restrictions or even the fact that by late 2022, COVID seemed like something from the past and thus people relaxed a touch too much.
+
+## Linear Regression Model: New Deaths vs New Cases by Period
+
+To test whether vaccines changed the relationship between cases and deaths I'll fit a linear regression model that predicts new deaths from new cases with an interaction term for the vaccination period.
+```{r prepare_model_data}
+# aggregate weekly data
+us_weekly <- us_totals %>%
+  filter(!is.na(new_cases) & !is.na(new_deaths)) %>%
+  mutate(week = floor_date(date, "week")) %>%
+  group_by(week, period) %>%
+  summarize(
+    avg_new_cases = mean(new_cases, na.rm = TRUE),
+    avg_new_deaths = mean(new_deaths, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(avg_new_cases >= 0 & avg_new_deaths >= 0)
+
+head(us_weekly, 10)
+```
+
+I'm using weekly averages to avoid noise from reporting delays and weekend effects.
+```{r fit_model}
+# Fitmodel
+model <- lm(avg_new_deaths ~ avg_new_cases * period, data = us_weekly)
+
+summary(model)
+```
+
+### Model Interpretation
+
+The model shows that the relationship between cases and deaths changed after vaccines became available. In the post-vaccination period each additional case led to fewer deaths compared to before vaccines which makes sense if vaccines are working to prevent serious illness. The coefficient shows that before vaccines each new case added about r round(coef(model)[2], 4) deaths but after vaccines this dropped by r round(abs(coef(model)[4]), 4). The R-squared value of r round(summary(model)$r.squared, 3) means the model explains about r round(summary(model)$r.squared * 100, 1)% of what's happening with deaths which is pretty good for health data that has a lot of random variation.
+```{r model_predictions}
+# Add predictions
+us_weekly <- us_weekly %>%
+  mutate(predicted_deaths = predict(model))
+
+head(us_weekly %>% select(week, period, avg_new_cases, avg_new_deaths, predicted_deaths), 10)
+```
+```{r plot_model, fig.width=12, fig.height=7}
+ggplot(us_weekly, aes(x = avg_new_cases, y = avg_new_deaths, color = period)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_line(aes(y = predicted_deaths), size = 1.2) +
+  scale_color_manual(values = c("Pre-Vaccination" = "red", 
+                                 "Post-Vaccination" = "blue")) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Relationship Between New Cases and New Deaths",
+    subtitle = "Linear model shows reduced death rate in post-vaccination period",
+    x = "Average New Cases Per Day (Weekly)",
+    y = "Average New Deaths Per Day (Weekly)",
+    color = "Period"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 14, face = "bold"))
+```
+
+### Model Takeaways
+
+The visualization shows that the slope of the relationship between cases and deaths is steeper in the pre-vaccination period compared to post-vaccination. The red dots and line show that before vaccines the same number of new cases led to more deaths while the blue dots and line show a flatter slope, which means that  fewer deaths per case after vaccines happaned. There's still a lot of scatter in the points especially in the post-vaccination period .This means other factors beyond just vaccination are affecting death rates like new variants, treatment improvements and/or changes in who's getting infected. But the overall pattern sugests that vaccines reduced the severity of COVID infections.
+
+## Bias Discussion
+
+Before drawing final conclusions we need to look at possible biasis
+
+**Testing Availability Changed Over Time**
+Early pandemic testing was extremely limited so we were definitely undercounting cases. 
+
+**Reporting Practices Weren't Consistent**
+Different states used different systems for counting COVID deaths and the definitions changed over time. It is unclear if data counts only pure COVID deaths or also includes any where COVID was just a contributing factor
+
+**Other Factors Changed Besides Vaccines**
+Treatment has improved over time with new drugs and strategies becoming available. Moreover, we are exclusing any considiration of different variants of COVID visous. 
+
+## Conclusion
+
+This analysis shows that COVID cases and deaths in the US grew exponentially at first and then went through multiple waves over the past few years. The most important finding is that after vaccines became widely available in 2021 the relationship between new cases and new deaths changed with the same number of cases resulting in fewer deaths(per model results). However the data limitations like inconsistent reporting across states and many confounding factors that make it hard to isolate the vaccine effect. 
