@@ -254,4 +254,5 @@ Treatment has improved over time with new drugs and strategies becoming availabl
 
 ## Conclusion
 
+
 This analysis shows that COVID cases and deaths in the US grew exponentially at first and then went through multiple waves over the past few years. The most important finding is that after vaccines became widely available in 2021 the relationship between new cases and new deaths changed with the same number of cases resulting in fewer deaths(per model results). However the data limitations like inconsistent reporting across states and many confounding factors that make it hard to isolate the vaccine effect. 
